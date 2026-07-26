@@ -1,1 +1,11 @@
-info.md
+infos.md
+node_modules/
+.env
+
+backend/node_modules/
+frontend/node_modules/
+
+backend/storage/
+backend/uploads/
+
+*.log

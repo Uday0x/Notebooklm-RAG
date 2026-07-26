@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Notebook {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sources       Source[]
+  conversations Conversation[]
+}
+
+model Source {
+  id               String       @id @default(uuid())
+  notebookId       String
+  title            String
+  type             SourceType
+  status           SourceStatus @default(PENDING)
+  originalFileName String?
+  storagePath      String?
+  errorMessage     String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  notebook Notebook @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+}
+
+model Conversation {
+  id         String  @id @default(uuid())
+  notebookId String
+  title      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notebook Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([notebookId])
+}
+
+model Message {
+  id             String @id @default(uuid())
+  conversationId String
+
+  role    MessageRole
+  content String
+
+  createdAt DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+enum SourceType {
+  PDF
+  DOCX
+  WEBSITE
+  YOUTUBE
+  TEXT
+  VTT
+}
+
+enum SourceStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
