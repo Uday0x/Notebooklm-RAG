@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Children, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BrowserRouter,
   Link,
@@ -21,6 +21,7 @@ import {
   ArrowRight,
   BookOpen,
   Check,
+  ChevronDown,
   ChevronLeft,
   Clock3,
   Copy,
@@ -41,13 +42,22 @@ import {
 import { api } from "./api/client";
 import { streamMessage } from "./lib/sse";
 import { bytesLabel, domainFromUrl, formatDate, safeError } from "./lib/format";
+import {
+  formatLocationLabel,
+  formatSourceLocation,
+  sourceTypeLabel,
+} from "./lib/formatSourceLocation";
+import {
+  shouldRetryQuery,
+  sourceRefetchInterval,
+} from "./lib/sourcePolling";
 import "./App.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 20_000,
-      retry: 1,
+      retry: shouldRetryQuery,
     },
   },
 });
@@ -60,6 +70,74 @@ const sourceIcons = {
   WEBSITE: Globe2,
   YOUTUBE: Video,
 };
+
+const emptyMessagesPage = { messages: [], nextCursor: null };
+const suggestionPrompts = [
+  "Summarise the main ideas",
+  "Explain the most difficult concept",
+  "Create revision questions",
+  "List the important points",
+];
+const LEFT_PANEL_MIN = 240;
+const LEFT_PANEL_MAX = 560;
+const RIGHT_PANEL_MIN = 280;
+const RIGHT_PANEL_MAX = 620;
+const CHAT_PANEL_MIN = 420;
+
+function sortConversations(conversations) {
+  return [...conversations].sort(
+    (a, b) => new Date(b.updatedAt ?? 0).getTime() - new Date(a.updatedAt ?? 0).getTime(),
+  );
+}
+
+function dedupeMessages(messages = []) {
+  const seen = new Set();
+  return messages.filter((message) => {
+    const key = message.id ?? `${message.role}-${message.createdAt}-${message.content}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeMessageCitations(previous = [], incoming = []) {
+  const citationById = new Map(
+    previous
+      .filter((message) => message.citations?.length > 0)
+      .map((message) => [message.id, message.citations]),
+  );
+
+  return incoming.map((message) => ({
+    ...message,
+    citations: message.citations?.length
+      ? message.citations
+      : citationById.get(message.id) ?? [],
+  }));
+}
+
+function fallbackCitationsFromContent(content, existingCitations = []) {
+  if (existingCitations.length > 0) return existingCitations;
+
+  const numbers = new Set(
+    [...String(content ?? "").matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])),
+  );
+
+  return [...numbers].sort((a, b) => a - b).map((citationNumber) => ({
+    citationNumber,
+    sourceTitle: "Source",
+    sourceType: "UNKNOWN",
+    location: {},
+    text: "Citation details are unavailable for this saved message.",
+  }));
+}
+
+function conversationStorageKey(notebookId) {
+  return `marginnote.activeConversation.${notebookId}`;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
 
 function App() {
   return (
@@ -259,6 +337,10 @@ function WorkspacePage() {
   const [reference, setReference] = useState(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [selectedSourceIds, setSelectedSourceIds] = useState([]);
+  const [sourceSelectionMode, setSourceSelectionMode] = useState("auto");
+  const [leftPanelWidth, setLeftPanelWidth] = useState(300);
+  const [rightPanelWidth, setRightPanelWidth] = useState(410);
+  const autoConversationRequestedRef = useRef(false);
 
   const notebook = useQuery({ queryKey: ["notebook", notebookId], queryFn: () => api.notebook(notebookId) });
   const config = useQuery({ queryKey: ["config"], queryFn: api.config });
@@ -266,25 +348,54 @@ function WorkspacePage() {
   const sources = useQuery({
     queryKey: ["sources", notebookId],
     queryFn: () => api.sources(notebookId),
-    refetchInterval: (query) =>
-      query.state.data?.some((source) => ["PENDING", "PROCESSING"].includes(source.status)) ? 3000 : false,
+    enabled: Boolean(notebookId),
+    retry: shouldRetryQuery,
+    refetchInterval: sourceRefetchInterval,
   });
   const conversations = useQuery({
     queryKey: ["conversations", notebookId],
     queryFn: () => api.conversations(notebookId),
+    enabled: Boolean(notebookId),
   });
 
-  useEffect(() => {
-    if (!conversationId && conversations.data?.[0]) {
-      setSearchParams({ conversation: conversations.data[0].id }, { replace: true });
+  const selectConversation = useCallback((id, { replace = false } = {}) => {
+    if (id) {
+      localStorage.setItem(conversationStorageKey(notebookId), id);
+      setSearchParams({ conversation: id }, { replace });
+    } else {
+      localStorage.removeItem(conversationStorageKey(notebookId));
+      setSearchParams({}, { replace });
     }
-  }, [conversationId, conversations.data, setSearchParams]);
+  }, [notebookId, setSearchParams]);
 
   const createConversation = useMutation({
     mutationFn: () => api.createConversation(notebookId),
     onSuccess: (conversation) => {
+      qc.setQueryData(["conversations", notebookId], (old = []) =>
+        sortConversations([conversation, ...old.filter((item) => item.id !== conversation.id)]),
+      );
+      selectConversation(conversation.id, { replace: autoConversationRequestedRef.current });
+    },
+    onSettled: () => {
+      autoConversationRequestedRef.current = false;
+    },
+  });
+
+  const deleteConversation = useMutation({
+    mutationFn: api.deleteConversation,
+    onSuccess: (_, deletedId) => {
+      const remaining = sortConversations(
+        (qc.getQueryData(["conversations", notebookId]) ?? conversations.data ?? []).filter(
+          (item) => item.id !== deletedId,
+        ),
+      );
+      qc.setQueryData(["conversations", notebookId], remaining);
+      qc.removeQueries({ queryKey: ["messages", deletedId] });
+      if (deletedId === conversationId) {
+        setReference(null);
+        selectConversation(remaining[0]?.id ?? "", { replace: true });
+      }
       qc.invalidateQueries({ queryKey: ["conversations", notebookId] });
-      setSearchParams({ conversation: conversation.id });
     },
   });
 
@@ -292,6 +403,131 @@ function WorkspacePage() {
     () => sources.data?.filter((source) => source.status === "READY") ?? [],
     [sources.data],
   );
+  const automaticSourceIds = useMemo(
+    () => readySources.map((source) => source.id),
+    [readySources],
+  );
+  const effectiveSelectedSourceIds =
+    sourceSelectionMode === "auto" ? automaticSourceIds : selectedSourceIds;
+  const sortedConversations = useMemo(
+    () => sortConversations(conversations.data ?? []),
+    [conversations.data],
+  );
+  const validConversationIds = useMemo(
+    () => new Set(sortedConversations.map((conversation) => conversation.id)),
+    [sortedConversations],
+  );
+
+  function setSourceSelection(ids, mode = "manual") {
+    setSourceSelectionMode(mode);
+    setSelectedSourceIds(ids);
+  }
+
+  function startNewConversation() {
+    if (createConversation.isPending) return;
+    const previousId = conversationId;
+    setReference(null);
+    if (previousId) {
+      qc.cancelQueries({ queryKey: ["messages", previousId] });
+    }
+    createConversation.mutate(undefined, {
+      onSuccess: (conversation) => {
+        qc.setQueryData(["messages", conversation.id], emptyMessagesPage);
+      },
+    });
+  }
+
+  function startPaneResize(pane, event) {
+    event.preventDefault();
+    const rightWidth = reference ? rightPanelWidth : 0;
+    const leftWidth = leftPanelWidth;
+
+    function handlePointerMove(moveEvent) {
+      const viewportWidth = window.innerWidth;
+
+      if (pane === "left") {
+        const maxLeft = Math.min(
+          LEFT_PANEL_MAX,
+          viewportWidth - rightWidth - CHAT_PANEL_MIN - 24,
+        );
+        setLeftPanelWidth(clamp(moveEvent.clientX, LEFT_PANEL_MIN, maxLeft));
+      }
+
+      if (pane === "right") {
+        const maxRight = Math.min(
+          RIGHT_PANEL_MAX,
+          viewportWidth - leftWidth - CHAT_PANEL_MIN - 24,
+        );
+        setRightPanelWidth(
+          clamp(viewportWidth - moveEvent.clientX, RIGHT_PANEL_MIN, maxRight),
+        );
+      }
+    }
+
+    function stopResize() {
+      document.body.classList.remove("pane-resizing");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    }
+
+    document.body.classList.add("pane-resizing");
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  }
+
+  function resizeWithKeyboard(pane, event) {
+    const deltaByKey = {
+      ArrowLeft: -24,
+      ArrowRight: 24,
+    };
+    const delta = deltaByKey[event.key];
+    if (!delta) return;
+
+    event.preventDefault();
+    if (pane === "left") {
+      setLeftPanelWidth((width) => clamp(width + delta, LEFT_PANEL_MIN, LEFT_PANEL_MAX));
+    }
+    if (pane === "right") {
+      setRightPanelWidth((width) => clamp(width - delta, RIGHT_PANEL_MIN, RIGHT_PANEL_MAX));
+    }
+  }
+
+  useEffect(() => {
+    if (conversations.isLoading || conversations.isFetching || createConversation.isPending) return;
+
+    const conversationsList = sortedConversations;
+    const urlConversationIsValid = conversationId && validConversationIds.has(conversationId);
+    if (urlConversationIsValid) {
+      localStorage.setItem(conversationStorageKey(notebookId), conversationId);
+      return;
+    }
+
+    const storedConversationId = localStorage.getItem(conversationStorageKey(notebookId));
+    const fallbackId =
+      (storedConversationId && validConversationIds.has(storedConversationId) && storedConversationId) ||
+      conversationsList[0]?.id;
+
+    if (fallbackId) {
+      selectConversation(fallbackId, { replace: true });
+      return;
+    }
+
+    if (!autoConversationRequestedRef.current && conversationsList.length === 0) {
+      autoConversationRequestedRef.current = true;
+      createConversation.mutate();
+    }
+  }, [
+    conversationId,
+    conversations.isFetching,
+    conversations.isLoading,
+    createConversation,
+    notebookId,
+    selectConversation,
+    sortedConversations,
+    validConversationIds,
+  ]);
 
   if (notebook.isLoading) return <main className="page"><LoadingRows label="Opening notebook" /></main>;
   if (notebook.error) return <main className="page"><ErrorState message={safeError(notebook.error)} /></main>;
@@ -301,39 +537,62 @@ function WorkspacePage() {
       <header className="workspace-top">
         <Link className="brand" to="/notebooks"><ChevronLeft size={20} /> MarginNote</Link>
         <div className="title-stack">
+          <small>Notebook</small>
           <span>{notebook.data.title}</span>
           <small>{stats.data?.sources?.ready ?? 0} ready sources</small>
         </div>
         <button className="icon-button mobile-only" onClick={() => setSourcesOpen(true)} aria-label="Open sources">
           <Menu />
         </button>
-        <button className="sketch-button small" onClick={() => createConversation.mutate()}>
+        <button className="sketch-button small" onClick={startNewConversation} disabled={createConversation.isPending}>
           <MessageSquarePlus size={17} /> New chat
         </button>
       </header>
 
-      <div className="workspace-grid">
+      <div
+        className="workspace-grid"
+        style={{
+          "--left-panel-width": `${leftPanelWidth}px`,
+          "--right-panel-width": reference ? `${rightPanelWidth}px` : "0px",
+        }}
+      >
         <SourcesPanel
           notebookId={notebookId}
           config={config.data}
           sources={sources.data ?? []}
-          selectedSourceIds={selectedSourceIds}
-          setSelectedSourceIds={setSelectedSourceIds}
+          selectedSourceIds={effectiveSelectedSourceIds}
+          setSelectedSourceIds={setSourceSelection}
           onOpen={(source) => setReference({ kind: "source", source })}
           drawerOpen={sourcesOpen}
           closeDrawer={() => setSourcesOpen(false)}
         />
+        <PaneResizeHandle
+          label="Resize sources panel"
+          onPointerDown={(event) => startPaneResize("left", event)}
+          onKeyDown={(event) => resizeWithKeyboard("left", event)}
+        />
         <ChatPanel
           notebookId={notebookId}
           conversationId={conversationId}
-          conversations={conversations.data ?? []}
+          conversations={sortedConversations}
           readySources={readySources}
-          selectedSourceIds={selectedSourceIds}
-          setSelectedSourceIds={setSelectedSourceIds}
-          onSelectConversation={(id) => setSearchParams({ conversation: id })}
-          onCreateConversation={() => createConversation.mutate()}
+          selectedSourceIds={effectiveSelectedSourceIds}
+          setSelectedSourceIds={setSourceSelection}
+          onSelectConversation={(id) => selectConversation(id)}
+          onCreateConversation={startNewConversation}
+          onDeleteConversation={(id) => deleteConversation.mutate(id)}
+          deletingConversationId={deleteConversation.variables}
+          creatingConversation={createConversation.isPending}
           onReference={(citation) => setReference({ kind: "citation", citation })}
+          onConversationChange={() => setReference(null)}
         />
+        {reference && (
+          <PaneResizeHandle
+            label="Resize reference panel"
+            onPointerDown={(event) => startPaneResize("right", event)}
+            onKeyDown={(event) => resizeWithKeyboard("right", event)}
+          />
+        )}
         <ReferencePanel reference={reference} onClose={() => setReference(null)} />
       </div>
     </main>
@@ -443,11 +702,12 @@ function SourcesPanel({
             key={source.id}
             source={source}
             selected={selectedSourceIds.includes(source.id)}
-            onSelect={(checked) =>
-              setSelectedSourceIds((current) =>
-                checked ? [...current, source.id] : current.filter((id) => id !== source.id),
-              )
-            }
+            onSelect={(checked) => {
+              const nextIds = checked
+                ? [...new Set([...selectedSourceIds, source.id])]
+                : selectedSourceIds.filter((id) => id !== source.id);
+              setSelectedSourceIds(nextIds, "manual");
+            }}
             onOpen={() => onOpen(source)}
             onDelete={() => remove.mutate(source.id)}
             deleting={remove.isPending}
@@ -465,6 +725,22 @@ function SourcesPanel({
   );
 }
 
+function PaneResizeHandle({ label, onPointerDown, onKeyDown }) {
+  return (
+    <div
+      className="pane-resize-handle"
+      role="separator"
+      aria-label={label}
+      aria-orientation="vertical"
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    >
+      <span />
+    </div>
+  );
+}
+
 function resetAfterAdd(qc, notebookId, setTitle, setUrl, setText, setFile) {
   setTitle("");
   setUrl("");
@@ -479,21 +755,26 @@ function SourceItem({ source, selected, onSelect, onOpen, onDelete, deleting }) 
   const canSelect = source.status === "READY";
   return (
     <article className="source-item">
-      <button className="source-main" onClick={onOpen}>
-        <Icon size={18} />
-        <span>
-          <strong>{source.title}</strong>
-          <small>{source.type} - {formatDate(source.updatedAt)}</small>
-        </span>
-      </button>
-      <StatusBadge status={source.status} />
-      <label className="mini-check">
-        <input type="checkbox" checked={selected} disabled={!canSelect} onChange={(event) => onSelect(event.target.checked)} />
-        use
-      </label>
-      <button className="icon-button danger" aria-label={`Delete ${source.title}`} disabled={deleting} onClick={onDelete}>
-        <Trash2 size={16} />
-      </button>
+      <div className="source-item-top">
+        <button className="source-main" onClick={onOpen}>
+          <Icon size={18} />
+          <span>
+            <strong>{source.title}</strong>
+            <small>{source.type} - {formatDate(source.updatedAt)}</small>
+          </span>
+        </button>
+        <StatusBadge status={source.status} />
+      </div>
+      {source.errorMessage && <p className="source-error">{source.errorMessage}</p>}
+      <div className="source-actions">
+        <label className="mini-check">
+          <input type="checkbox" checked={selected} disabled={!canSelect} onChange={(event) => onSelect(event.target.checked)} />
+          Use in chat
+        </label>
+        <button className="icon-button danger" aria-label={`Delete ${source.title}`} disabled={deleting} onClick={onDelete} title="Delete source">
+          <Trash2 size={16} />
+        </button>
+      </div>
     </article>
   );
 }
@@ -507,63 +788,146 @@ function ChatPanel({
   setSelectedSourceIds,
   onSelectConversation,
   onCreateConversation,
+  onDeleteConversation,
+  deletingConversationId,
+  creatingConversation,
   onReference,
+  onConversationChange,
 }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const [streamText, setStreamText] = useState("");
-  const [streamCitations, setStreamCitations] = useState([]);
+  const [temporaryMessage, setTemporaryMessage] = useState(null);
   const [error, setError] = useState("");
+  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
+  const composerRef = useRef(null);
+  const activeConversationRef = useRef(conversationId);
 
   const messages = useQuery({
     queryKey: ["messages", conversationId],
-    queryFn: () => api.messages(conversationId, { limit: 100 }),
+    queryFn: async () => {
+      const page = await api.messages(conversationId, { limit: 100 });
+      const previous = qc.getQueryData(["messages", conversationId]);
+      return {
+        ...page,
+        messages: mergeMessageCitations(previous?.messages, page.messages),
+      };
+    },
     enabled: Boolean(conversationId),
   });
 
   const activeConversation = conversations.find((item) => item.id === conversationId);
-  const visibleMessages = messages.data?.messages ?? [];
+  const temporaryVisible =
+    temporaryMessage?.conversationId === conversationId ? [temporaryMessage] : [];
+  const visibleMessages = dedupeMessages([
+    ...(messages.data?.messages ?? []),
+    ...temporaryVisible,
+  ]);
   const allowedSelectedIds = selectedSourceIds.filter((id) => readySources.some((source) => source.id === id));
+  const selectedReadyCount = allowedSelectedIds.length;
+  const hasReadySources = readySources.length > 0;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [visibleMessages.length, streamText]);
+  }, [visibleMessages.length, temporaryMessage?.content]);
 
-  async function send(event) {
-    event.preventDefault();
-    const content = draft.trim();
-    if (!content || !conversationId || readySources.length === 0 || streaming) return;
+  useEffect(() => {
+    if (activeConversationRef.current === conversationId) return;
+    abortRef.current?.abort();
+    activeConversationRef.current = conversationId;
+    setTemporaryMessage(null);
+    setStreaming(false);
+    setError("");
+    setConversationMenuOpen(false);
+    onConversationChange?.();
+    if (conversationId && !messages.data) {
+      qc.setQueryData(["messages", conversationId], emptyMessagesPage);
+    }
+  }, [conversationId, messages.data, onConversationChange, qc]);
 
+  async function send(eventOrPrompt) {
+    const content =
+      typeof eventOrPrompt === "string"
+        ? eventOrPrompt.trim()
+        : draft.trim();
+    if (typeof eventOrPrompt !== "string") {
+      eventOrPrompt.preventDefault();
+    }
+    if (!content || !conversationId || !hasReadySources || streaming) return;
+
+    const targetConversationId = conversationId;
     setDraft("");
     setError("");
     setStreaming(true);
-    setStreamText("");
-    setStreamCitations([]);
+    setTemporaryMessage({
+      id: `temporary-assistant-${targetConversationId}`,
+      conversationId: targetConversationId,
+      role: "ASSISTANT",
+      content: "",
+      citations: [],
+      createdAt: new Date().toISOString(),
+      pending: true,
+    });
     abortRef.current = new AbortController();
-    qc.setQueryData(["messages", conversationId], (old) => ({
-      messages: [...(old?.messages ?? []), { id: `local-${Date.now()}`, role: "USER", content, createdAt: new Date().toISOString() }],
+    qc.setQueryData(["messages", targetConversationId], (old) => ({
+      messages: dedupeMessages([
+        ...(old?.messages ?? []),
+        {
+          id: `local-user-${targetConversationId}-${Date.now()}`,
+          conversationId: targetConversationId,
+          role: "USER",
+          content,
+          createdAt: new Date().toISOString(),
+        },
+      ]),
       nextCursor: old?.nextCursor ?? null,
     }));
 
     try {
       await streamMessage({
-        conversationId,
+        conversationId: targetConversationId,
         content,
         sourceIds: allowedSelectedIds,
         signal: abortRef.current.signal,
         onEvent: ({ event: name, data }) => {
           if (name === "metadata" && data?.conversationTitle) {
             qc.setQueryData(["conversations", notebookId], (old) =>
-              old?.map((item) => (item.id === conversationId ? { ...item, title: data.conversationTitle } : item)),
+              sortConversations(
+                old?.map((item) =>
+                  item.id === targetConversationId ? { ...item, title: data.conversationTitle } : item,
+                ) ?? [],
+              ),
             );
           }
-          if (name === "token") setStreamText((current) => `${current}${data?.content ?? ""}`);
+          if (name === "token") {
+            setTemporaryMessage((current) => ({
+              id: `temporary-assistant-${targetConversationId}`,
+              conversationId: targetConversationId,
+              role: "ASSISTANT",
+              content: `${current?.content ?? ""}${data?.content ?? ""}`,
+              citations: current?.citations ?? [],
+              createdAt: new Date().toISOString(),
+              pending: false,
+            }));
+          }
           if (name === "complete") {
-            setStreamCitations(data?.citations ?? []);
-            qc.invalidateQueries({ queryKey: ["messages", conversationId] });
+            setTemporaryMessage(null);
+            if (data?.assistantMessage) {
+              qc.setQueryData(["messages", targetConversationId], (old) => ({
+                messages: dedupeMessages([
+                  ...(old?.messages ?? []),
+                  {
+                    ...data.assistantMessage,
+                    conversationId: targetConversationId,
+                    citations: data?.citations ?? [],
+                  },
+                ]),
+                nextCursor: old?.nextCursor ?? null,
+              }));
+            }
+            qc.invalidateQueries({ queryKey: ["messages", targetConversationId] });
             qc.invalidateQueries({ queryKey: ["conversations", notebookId] });
           }
           if (name === "error") setError(data?.message || "Streaming failed");
@@ -580,64 +944,98 @@ function ChatPanel({
     }
   }
 
+  function sendSuggestion(prompt) {
+    send(prompt);
+  }
+
+  function selectReadySources() {
+    setSelectedSourceIds(readySources.map((source) => source.id), "manual");
+  }
+
   return (
     <section className="chat-panel">
-      <div className="conversation-rail">
-        <button className="sketch-button small" onClick={onCreateConversation}><Plus size={16} /> Chat</button>
-        {conversations.map((conversation) => (
-          <button
-            key={conversation.id}
-            className={conversation.id === conversationId ? "conversation active" : "conversation"}
-            onClick={() => onSelectConversation(conversation.id)}
-          >
-            <strong>{conversation.title || "New conversation"}</strong>
-            <small>{conversation.messageCount ?? 0} messages</small>
-          </button>
-        ))}
-      </div>
       <div className="chat-main">
         <header className="chat-head">
-          <div>
-            <h2>{activeConversation?.title || "New conversation"}</h2>
-            <small>{readySources.length} ready sources available</small>
+          <div className="conversation-switcher">
+            <button
+              className="conversation-trigger"
+              onClick={() => setConversationMenuOpen((open) => !open)}
+              aria-expanded={conversationMenuOpen}
+            >
+              <span>
+                <strong>{activeConversation?.title || "New conversation"}</strong>
+                <small>
+                  {selectedReadyCount} of {readySources.length} ready sources selected
+                </small>
+              </span>
+              <ChevronDown size={18} />
+            </button>
+            {conversationMenuOpen && (
+              <div className="conversation-menu">
+                <div className="conversation-menu-head">
+                  <strong>Conversations</strong>
+                  <button className="sketch-button small" onClick={onCreateConversation} disabled={creatingConversation}>
+                    <Plus size={16} /> New chat
+                  </button>
+                </div>
+                <div className="conversation-list">
+                  {conversations.map((conversation) => (
+                    <div
+                      className={conversation.id === conversationId ? "conversation-row active" : "conversation-row"}
+                      key={conversation.id}
+                    >
+                      <button onClick={() => onSelectConversation(conversation.id)}>
+                        <strong>{conversation.title || "New conversation"}</strong>
+                        <small>{conversation.lastMessagePreview?.content || `${conversation.messageCount ?? 0} messages`}</small>
+                      </button>
+                      <button
+                        className="icon-button danger"
+                        aria-label={`Delete ${conversation.title || "New conversation"}`}
+                        disabled={deletingConversationId === conversation.id}
+                        onClick={() => onDeleteConversation(conversation.id)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  {conversations.length === 0 && <p className="note-text">No conversations yet.</p>}
+                </div>
+              </div>
+            )}
           </div>
           <button
             className="ghost-button compact"
-            onClick={() => setSelectedSourceIds(readySources.map((source) => source.id))}
+            onClick={selectReadySources}
+            disabled={!hasReadySources}
           >
-            Select ready
+            Sources: {selectedReadyCount} selected
           </button>
         </header>
         <div className="message-list">
-          {readySources.length === 0 && (
+          {messages.isFetching && !messages.data && conversationId && <LoadingRows label="Loading conversation" />}
+          {messages.error && <ErrorState message={safeError(messages.error)} />}
+          {!hasReadySources && (
             <EmptyState title="Add and finish processing a source before asking questions." text="The backend only chats over READY sources." />
           )}
-          {conversationId && visibleMessages.length === 0 && readySources.length > 0 && (
+          {conversationId && visibleMessages.length === 0 && hasReadySources && !messages.isFetching && (
             <div className="prompt-grid">
-              {["Summarise the main ideas", "Explain the most difficult concept", "Create revision questions"].map((prompt) => (
-                <button key={prompt} onClick={() => setDraft(prompt)}>{prompt}</button>
+              {suggestionPrompts.map((prompt) => (
+                <button key={prompt} onClick={() => sendSuggestion(prompt)}>{prompt}</button>
               ))}
             </div>
           )}
           {visibleMessages.map((message) => (
-            <MessageCard key={message.id} message={message} citations={[]} onReference={onReference} />
+            <MessageCard key={message.id} message={message} citations={message.citations ?? []} onReference={onReference} />
           ))}
-          {streamText && (
-            <MessageCard
-              message={{ role: "ASSISTANT", content: streamText }}
-              citations={streamCitations}
-              onReference={onReference}
-            />
-          )}
           <div ref={bottomRef} />
         </div>
         {error && <p className="error-text">{error}</p>}
-        <form className="composer" onSubmit={send}>
+        <form className="composer" ref={composerRef} onSubmit={send}>
           <textarea
             value={draft}
             rows={1}
-            placeholder={readySources.length ? "Ask a grounded question..." : "Waiting for READY sources"}
-            disabled={!conversationId || readySources.length === 0}
+            placeholder={hasReadySources ? "Ask a grounded question..." : "Waiting for READY sources"}
+            disabled={!conversationId || !hasReadySources}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) send(event);
@@ -646,7 +1044,7 @@ function ChatPanel({
           {streaming ? (
             <button type="button" className="ghost-button compact" onClick={() => abortRef.current?.abort()}>Stop</button>
           ) : (
-            <button className="sketch-button icon-send" disabled={!draft.trim() || readySources.length === 0}>
+            <button className="sketch-button icon-send" disabled={!draft.trim() || !hasReadySources}>
               <Send size={18} />
             </button>
           )}
@@ -658,14 +1056,45 @@ function ChatPanel({
 
 function MessageCard({ message, citations, onReference }) {
   const isUser = message.role === "USER";
+  const hasInlineCitationMarkers = /\[\d+\]/.test(message.content ?? "");
+  const resolvedCitations = isUser
+    ? []
+    : fallbackCitationsFromContent(message.content, citations);
   return (
-    <article className={`message-card ${isUser ? "user" : "assistant"}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-      {!isUser && citations?.length > 0 && (
+    <article className={`message-card ${isUser ? "user" : "assistant"} ${message.pending ? "thinking" : ""}`}>
+      {message.pending && !message.content ? (
+        <div className="thinking-line" aria-live="polite">
+          <span className="thinking-pencil" aria-hidden="true" />
+          <span>Thinking through your sources</span>
+          <i aria-hidden="true" />
+          <i aria-hidden="true" />
+          <i aria-hidden="true" />
+        </div>
+      ) : (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            p: ({ children }) => (
+              <p>{renderCitationChildren(children, resolvedCitations, onReference)}</p>
+            ),
+            li: ({ children }) => (
+              <li>{renderCitationChildren(children, resolvedCitations, onReference)}</li>
+            ),
+          }}
+        >
+          {message.content}
+        </ReactMarkdown>
+      )}
+      {!isUser && !hasInlineCitationMarkers && resolvedCitations.length > 0 && (
         <div className="citation-row">
-          {citations.map((citation) => (
-            <button className="citation-chip" key={`${citation.sourceId}-${citation.citationNumber}`} onClick={() => onReference(citation)}>
-              [{citation.citationNumber}] {citation.sourceTitle}
+          {resolvedCitations.map((citation) => (
+            <button
+              className="citation-chip"
+              key={`${citation.sourceId ?? "missing"}-${citation.citationNumber}`}
+              title={`${sourceTypeLabel(citation.sourceType)} - ${formatLocationLabel(citation.location, citation.sourceType)}`}
+              onClick={() => onReference(citation)}
+            >
+              [{citation.citationNumber}] {citation.sourceTitle || "Source"}
             </button>
           ))}
         </div>
@@ -679,12 +1108,93 @@ function MessageCard({ message, citations, onReference }) {
   );
 }
 
+function renderCitationChildren(children, citations, onReference) {
+  return Children.map(children, (child) => {
+    if (typeof child === "string") {
+      return renderCitationText(child, citations, onReference);
+    }
+
+    return child;
+  });
+}
+
+function renderCitationText(text, citations, onReference) {
+  const parts = [];
+  const pattern = /\[(\d+)\]/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    const citationNumber = Number(match[1]);
+    const citation = citations.find((item) => item.citationNumber === citationNumber);
+
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    parts.push(
+      <button
+        className="inline-citation"
+        key={`${match.index}-${citationNumber}`}
+        type="button"
+        title={
+          citation
+            ? `${sourceTypeLabel(citation.sourceType)} - ${formatLocationLabel(citation.location, citation.sourceType)}`
+            : "Open reference"
+        }
+        onClick={() => citation && onReference(citation)}
+      >
+        [{citationNumber}]
+      </button>,
+    );
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length ? parts : text;
+}
+
+function isMarkerOnlyCitationText(value = "") {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+
+  const lines = text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return false;
+
+  return lines.every((line) =>
+    [
+      /^[-\s]*\d+\s+of\s+\d+[-\s]*$/i,
+      /^[-\s]*page\s+\d+[-\s]*$/i,
+      /^[-\s]*\d+[-\s]*$/i,
+      /^[-\s]*unit\s+\d+[-\s]*$/i,
+    ].some((pattern) => pattern.test(line)),
+  );
+}
+
 function ReferencePanel({ reference, onClose }) {
+  const citation = reference?.kind === "citation" ? reference.citation : null;
+  const citationLocation = citation
+    ? formatSourceLocation(citation.location, citation.sourceType)
+    : [];
+  const citationUrl = citation?.location?.url || citation?.location?.sourceUrl;
+  const source = reference?.kind === "source" ? reference.source : null;
+  const sourceDomain = source ? domainFromUrl(source.url) : null;
+  const citationText = isMarkerOnlyCitationText(citation?.text)
+    ? "The indexed excerpt is unavailable. Reprocess this source."
+    : citation?.text || "Citation excerpt unavailable.";
+
   return (
     <aside className={`reference-panel ${reference ? "open" : ""}`}>
       <div className="panel-head">
         <div>
-          <h2>Source reference</h2>
+          <h2>{citation ? `Reference ${citation.citationNumber}` : "Source reference"}</h2>
           <small>{reference ? "Selected evidence" : "Nothing selected"}</small>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="Close reference">
@@ -692,37 +1202,51 @@ function ReferencePanel({ reference, onClose }) {
         </button>
       </div>
       {!reference && <EmptyState title="Select a source or citation to inspect it here." text="The chat stays in place while references open on the right." />}
-      {reference?.kind === "source" && (
+      {source && (
         <div className="reference-body">
-          <h3>{reference.source.title}</h3>
-          <StatusBadge status={reference.source.status} />
+          <div className="reference-title-row">
+            <h3>{source.title}</h3>
+            <StatusBadge status={source.status} />
+          </div>
           <dl>
-            <dt>Type</dt><dd>{reference.source.type}</dd>
-            <dt>Original file</dt><dd>{reference.source.originalFileName || "Not provided"}</dd>
-            <dt>Updated</dt><dd>{formatDate(reference.source.updatedAt)}</dd>
+            <dt>Type</dt><dd>{sourceTypeLabel(source.type)}</dd>
+            {sourceDomain && <><dt>Domain</dt><dd>{sourceDomain}</dd></>}
+            {source.originalFileName && <><dt>File</dt><dd>{source.originalFileName}</dd></>}
+            <dt>Updated</dt><dd>{formatDate(source.updatedAt)}</dd>
+            {source.errorMessage && <><dt>Issue</dt><dd>{source.errorMessage}</dd></>}
           </dl>
-          <p className="note-text">The backend does not expose a safe full-source file route yet. Citations will show retrieved excerpts here.</p>
+          <p className="note-text">Open a citation from an answer to inspect the exact retrieved passage.</p>
         </div>
       )}
-      {reference?.kind === "citation" && (
+      {citation && (
         <div className="reference-body">
-          <h3>[{reference.citation.citationNumber}] {reference.citation.sourceTitle}</h3>
+          <div className="reference-title-row">
+            <h3>{citation.sourceTitle || "Source"}</h3>
+            <span className="badge">{sourceTypeLabel(citation.sourceType)}</span>
+          </div>
           <dl>
-            <dt>Type</dt><dd>{reference.citation.sourceType}</dd>
-            <dt>Chunk</dt><dd>{reference.citation.chunkIndex ?? "Not provided"}</dd>
-            <dt>Score</dt><dd>{reference.citation.score?.toFixed?.(3) ?? "Not provided"}</dd>
-            {Object.entries(reference.citation.location || {}).map(([key, value]) => (
-              <Fragment key={key}>
-                <dt>{key}</dt><dd>{String(value)}</dd>
+            <dt>Type</dt><dd>{sourceTypeLabel(citation.sourceType)}</dd>
+            {citationLocation.map((line) => (
+              <Fragment key={line}>
+                <dt>Location</dt><dd>{line}</dd>
               </Fragment>
             ))}
+            {domainFromUrl(citationUrl) && <><dt>Domain</dt><dd>{domainFromUrl(citationUrl)}</dd></>}
           </dl>
-          <pre className="excerpt">{reference.citation.text || "Citation excerpt unavailable."}</pre>
-          {domainFromUrl(reference.citation.location?.url) && (
-            <a className="ghost-button" href={reference.citation.location.url} target="_blank" rel="noreferrer">
-              Open {domainFromUrl(reference.citation.location.url)}
+          <h4>Relevant passage</h4>
+          <pre className="excerpt">{citationText}</pre>
+          {domainFromUrl(citationUrl) && (
+            <a className="ghost-button" href={citationUrl} target="_blank" rel="noreferrer">
+              Open source
             </a>
           )}
+          <details className="technical-details">
+            <summary>Technical details</summary>
+            <dl>
+              {citation.chunkIndex !== undefined && <><dt>Chunk</dt><dd>{citation.chunkIndex}</dd></>}
+              {Number.isFinite(citation.score) && <><dt>Score</dt><dd>{citation.score.toFixed(3)}</dd></>}
+            </dl>
+          </details>
         </div>
       )}
     </aside>

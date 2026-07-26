@@ -1,4 +1,10 @@
-import "dotenv/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import dotenv from "dotenv";
+
+const configDir = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(configDir, "../.env") });
 
 export const SOURCE_TYPES = [
   "PDF",
@@ -43,6 +49,17 @@ export const MAX_RETRIEVAL_LIMIT = 20;
 export const DEFAULT_MESSAGE_PAGE_LIMIT = 20;
 export const MAX_MESSAGE_PAGE_LIMIT = 100;
 export const MAX_CONVERSATION_TITLE_LENGTH = 120;
+export const OPENAI_TRANSCRIPTION_FILE_LIMIT_BYTES =
+  25 * 1024 * 1024;
+export const DEFAULT_WEBSITE_TIMEOUT_MS = 15_000;
+export const DEFAULT_WEBSITE_MAX_RESPONSE_BYTES =
+  2 * 1024 * 1024;
+export const DEFAULT_WEBSITE_MIN_READABLE_TEXT_LENGTH = 200;
+export const DEFAULT_WEBSITE_REDIRECT_LIMIT = 5;
+
+export function parseStrictBooleanFlag(value) {
+  return String(value ?? "").trim().toLowerCase() === "true";
+}
 
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -69,6 +86,36 @@ export const config = {
     process.env.QUERY_REWRITE_MODEL ?? "gpt-4.1-mini",
   conversationTitleModel:
     process.env.CONVERSATION_TITLE_MODEL ?? "gpt-4.1-mini",
+  audioTranscriptionModel:
+    process.env.AUDIO_TRANSCRIPTION_MODEL ??
+    "whisper-1",
+  youtubeAudioFallbackEnabled:
+    process.env.YOUTUBE_AUDIO_FALLBACK_ENABLED !== "false",
+  youtubeMaxDurationSeconds: Number(
+    process.env.YOUTUBE_MAX_DURATION_SECONDS ?? 3600
+  ),
+  youtubeMaxAudioBytes: Number(
+    process.env.YOUTUBE_MAX_AUDIO_BYTES ??
+      OPENAI_TRANSCRIPTION_FILE_LIMIT_BYTES
+  ),
+  websiteBrowserFallbackEnabled:
+    parseStrictBooleanFlag(process.env.WEBSITE_BROWSER_FALLBACK_ENABLED),
+  websiteTimeoutMs: Number(
+    process.env.WEBSITE_TIMEOUT_MS ?? DEFAULT_WEBSITE_TIMEOUT_MS
+  ),
+  websiteMaxResponseBytes: Number(
+    process.env.WEBSITE_MAX_RESPONSE_BYTES ??
+      DEFAULT_WEBSITE_MAX_RESPONSE_BYTES
+  ),
+  websiteMinReadableTextLength: Number(
+    process.env.WEBSITE_MIN_READABLE_TEXT_LENGTH ??
+      process.env.WEBSITE_MIN_TEXT_LENGTH ??
+      DEFAULT_WEBSITE_MIN_READABLE_TEXT_LENGTH
+  ),
+  websiteRedirectLimit: Number(
+    process.env.WEBSITE_REDIRECT_LIMIT ??
+      DEFAULT_WEBSITE_REDIRECT_LIMIT
+  ),
   uploadDirectory:
     process.env.UPLOAD_DIR ??
     process.env.UPLOAD_DIRECTORY ??

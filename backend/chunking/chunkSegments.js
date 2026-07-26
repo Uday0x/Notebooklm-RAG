@@ -40,6 +40,10 @@ export function chunkSegments(
 
     const text = joinSegmentTexts(currentSegments);
 
+    if (!isMeaningfulChunkText(text)) {
+      return;
+    }
+
     chunks.push({
       chunkIndex: chunks.length + 1,
       text,
@@ -85,5 +89,36 @@ export function chunkSegments(
 
   createChunk();
 
+  if (chunks.length === 0) {
+    throw new Error(
+      "Chunker could not create meaningful chunks from extracted text"
+    );
+  }
+
   return chunks;
+}
+
+function isMeaningfulChunkText(value = "") {
+  const text = value.trim();
+  if (!text) return false;
+
+  const lines = text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const meaningfulLines = lines.filter((line) => !isMarkerOnlyLine(line));
+  const content = meaningfulLines.join(" ");
+  const words = content.match(/[A-Za-z]{3,}/g) ?? [];
+
+  return content.length >= 24 && words.length >= 4;
+}
+
+function isMarkerOnlyLine(value = "") {
+  return [
+    /^[-\s]*\d+\s+of\s+\d+[-\s]*$/i,
+    /^[-\s]*page\s+\d+[-\s]*$/i,
+    /^[-\s]*\d+[-\s]*$/i,
+    /^[-\s]*unit\s+\d+[-\s]*$/i,
+  ].some((pattern) => pattern.test(value.trim()));
 }

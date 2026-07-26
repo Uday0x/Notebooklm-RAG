@@ -1,5 +1,8 @@
 import "dotenv/config";
-import { Worker } from "bullmq";
+import {
+  UnrecoverableError,
+  Worker,
+} from "bullmq";
 
 import {
   SOURCE_QUEUE_NAME,
@@ -25,6 +28,30 @@ import {
 import {
   prisma,
 } from "../db/index.js";
+import {
+  config,
+} from "../config/index.js";
+import {
+  checkYoutubeFallbackTools,
+} from "../parser/youtube/externalTools.js";
+
+console.log(
+  `WEBSITE_BROWSER_FALLBACK_ENABLED=${process.env.WEBSITE_BROWSER_FALLBACK_ENABLED ?? ""}`
+);
+console.log(
+  `Website browser fallback enabled value: ${config.websiteBrowserFallbackEnabled}`
+);
+
+if (config.youtubeAudioFallbackEnabled) {
+  checkYoutubeFallbackTools().catch(
+    (error) => {
+      console.warn(
+        "YouTube audio fallback dependency check failed:",
+        error.message
+      );
+    }
+  );
+}
 
 export const sourceWorker = new Worker(
   SOURCE_QUEUE_NAME,
@@ -76,7 +103,21 @@ export const sourceWorker = new Worker(
           url,
 
           title,
+
+          onProgress: (progress) =>
+            job.updateProgress(progress),
         });
+
+      debugPdfPipeline("parsed segments", {
+        sourceType,
+        value: parsedSource.segments
+          ?.slice(0, 3)
+          .map((segment) => ({
+            text: segment.text?.slice(0, 180),
+            textLength: segment.text?.length ?? 0,
+            location: segment.location,
+          })),
+      });
 
       if (
         !parsedSource?.segments ||
@@ -97,6 +138,19 @@ export const sourceWorker = new Worker(
       const chunks = chunkSegments(
         parsedSource.segments
       );
+
+      debugPdfPipeline("chunks", {
+        sourceType,
+        value: chunks.slice(0, 3).map((chunk) => ({
+          text: chunk.text?.slice(0, 180),
+          textLength: chunk.text?.length ?? 0,
+          metadata: {
+            chunkIndex: chunk.chunkIndex,
+            location: chunk.location,
+            segmentCount: chunk.segmentCount,
+          },
+        })),
+      });
 
       if (
         !Array.isArray(chunks) ||
@@ -167,6 +221,9 @@ export const sourceWorker = new Worker(
       console.log(
         `Source processing completed: ${sourceId}`
       );
+      console.log(
+        `Source marked READY: ${sourceId}`
+      );
 
       return {
         sourceId,
@@ -177,9 +234,13 @@ export const sourceWorker = new Worker(
         chunkCount: chunks.length,
       };
     } catch (error) {
+      const safeMessage =
+        error.message ||
+        "Unknown processing error";
+
       console.error(
         `Source processing failed: ${sourceId}`,
-        error
+        safeMessage
       );
 
       try {
@@ -190,11 +251,13 @@ export const sourceWorker = new Worker(
 
           data: {
             status: "FAILED",
-            errorMessage:
-              error.message ||
-              "Unknown processing error",
+            errorMessage: safeMessage,
           },
         });
+
+        console.log(
+          `Source marked FAILED: ${sourceId}`
+        );
       } catch (databaseError) {
         console.error(
           "Failed to update source status:",
@@ -202,8 +265,12 @@ export const sourceWorker = new Worker(
         );
       }
 
-      // BullMQ ko batayega ki job fail hui.
-      // Attempts configured hain toh retry bhi hogi.
+      if (error.permanent === true) {
+        throw new UnrecoverableError(
+          safeMessage
+        );
+      }
+
       throw error;
     }
   },
@@ -305,3 +372,15 @@ process.on("uncaughtException", (error) => {
   console.error("Uncaught worker exception:", error);
   shutdown("uncaughtException");
 });
+
+function debugPdfPipeline(label, { sourceType, value }) {
+  if (
+    sourceType !== "PDF" ||
+    process.env.NODE_ENV !== "development" ||
+    process.env.PDF_PIPELINE_DEBUG !== "true"
+  ) {
+    return;
+  }
+
+  console.debug(`PDF pipeline ${label}:`, value);
+}

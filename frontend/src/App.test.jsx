@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
+import {
+  shouldRetryQuery,
+  sourceRefetchInterval,
+} from "./lib/sourcePolling";
+import { ApiError } from "./api/client";
 
 function renderApp(route = "/") {
   window.history.pushState({}, "", route);
@@ -33,5 +38,49 @@ describe("App shell", () => {
       target: { value: "Physics" },
     });
     expect(button).toBeEnabled();
+  });
+});
+
+describe("source polling", () => {
+  it("stops retrying and polling on 400", () => {
+    const error = new ApiError("A valid notebook id is required", {
+      status: 400,
+      data: {
+        success: false,
+        message: "A valid notebook id is required",
+      },
+    });
+
+    expect(shouldRetryQuery(0, error)).toBe(false);
+    expect(
+      sourceRefetchInterval({
+        state: {
+          error,
+          data: [{ status: "PROCESSING" }],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("stops polling when every source is terminal, including FAILED", () => {
+    expect(
+      sourceRefetchInterval({
+        state: {
+          error: null,
+          data: [{ status: "READY" }, { status: "FAILED" }],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("continues polling while a source is pending or processing", () => {
+    expect(
+      sourceRefetchInterval({
+        state: {
+          error: null,
+          data: [{ status: "READY" }, { status: "PENDING" }],
+        },
+      }),
+    ).toBe(3000);
   });
 });

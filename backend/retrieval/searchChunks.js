@@ -71,7 +71,7 @@ export async function searchChunks({
     searchRequest
   );
 
-  return results.map((result, index) => ({
+  const mappedResults = results.map((result, index) => ({
     rank: index + 1,
     pointId: result.id,
     score: result.score,
@@ -88,4 +88,26 @@ export async function searchChunks({
       embeddingModel: result.payload?.embeddingModel,
     },
   }));
+
+  debugRetrievalResults(mappedResults);
+
+  return mappedResults;
+}
+
+function debugRetrievalResults(results) {
+  if (
+    process.env.NODE_ENV !== "development" ||
+    process.env.PDF_PIPELINE_DEBUG !== "true"
+  ) {
+    return;
+  }
+
+  console.debug(
+    "Retrieved chunks:",
+    results.slice(0, 3).map((result) => ({
+      score: result.score,
+      text: result.text.slice(0, 180),
+      location: result.metadata.location,
+    }))
+  );
 }

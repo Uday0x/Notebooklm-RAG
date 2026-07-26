@@ -39,6 +39,20 @@ Start the worker separately:
 npm run worker:dev
 ```
 
+For YouTube sources, captions are attempted first. When captions are disabled
+or unavailable, the worker can fall back to audio transcription if
+`YOUTUBE_AUDIO_FALLBACK_ENABLED=true`. Install `yt-dlp` and `ffmpeg` on the
+host PATH before starting the API/worker. The fallback downloads audio into a
+unique temporary directory, transcribes it with OpenAI's audio transcription
+API, preserves segment timestamps, and removes temporary files in cleanup.
+
+Useful fallback settings:
+
+- `YOUTUBE_AUDIO_FALLBACK_ENABLED`
+- `YOUTUBE_MAX_DURATION_SECONDS`
+- `YOUTUBE_MAX_AUDIO_BYTES`
+- `AUDIO_TRANSCRIPTION_MODEL`
+
 ## Docker Setup
 
 ```bash
@@ -168,6 +182,9 @@ npm run test:smoke
 - If source processing stays `PENDING`, make sure the worker is running.
 - If sources fail during embedding or chat fails during retrieval/generation, verify `OPENAI_API_KEY`.
 - If uploads fail, check file extension, MIME type, and `MAX_UPLOAD_BYTES`.
+- If YouTube audio fallback fails immediately, verify `yt-dlp` and `ffmpeg`
+  are installed and the video is public, accessible, and within configured
+  duration and audio-size limits.
 
 ## Known Limitations
 

@@ -251,11 +251,36 @@ function createCitationFromChunk({
       chunk.metadata?.chunkIndex ?? null,
 
     location:
-      chunk.metadata?.location ?? {},
+      normalizeCitationLocation(
+        chunk.metadata?.location,
+        chunk.metadata?.sourceType
+      ),
 
     score:
       chunk.score ?? null,
 
     text: chunk.text,
   };
+}
+
+function normalizeCitationLocation(location = {}, sourceType) {
+  const fields = location && typeof location === "object" ? location : {};
+  const type = String(sourceType ?? "").toUpperCase();
+
+  if (type === "PDF") {
+    const start = fields.pageStart ?? fields.pageNumber ?? fields.page ?? fields.start?.pageNumber ?? fields.start?.page;
+    const end = fields.pageEnd ?? fields.end?.pageNumber ?? fields.end?.page ?? start;
+
+    if (start || end) {
+      return {
+        pageStart: Number(start ?? end),
+        pageEnd: Number(end ?? start),
+        ...(fields.totalPages !== undefined && {
+          totalPages: fields.totalPages,
+        }),
+      };
+    }
+  }
+
+  return fields;
 }

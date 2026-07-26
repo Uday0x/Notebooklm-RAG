@@ -16,7 +16,9 @@ export function apiUrl(path) {
 
 export async function request(path, options = {}) {
   const headers = new Headers(options.headers);
-  const hasBody = options.body !== undefined;
+  const method = options.method ?? "GET";
+  const isGet = method.toUpperCase() === "GET";
+  const hasBody = !isGet && options.body !== undefined;
 
   if (hasBody && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -24,11 +26,14 @@ export async function request(path, options = {}) {
 
   const response = await fetch(apiUrl(path), {
     ...options,
+    method,
     headers,
     body:
       hasBody && !(options.body instanceof FormData) && typeof options.body !== "string"
         ? JSON.stringify(options.body)
-        : options.body,
+        : hasBody
+          ? options.body
+          : undefined,
   });
 
   const contentType = response.headers.get("content-type") || "";
@@ -56,7 +61,13 @@ export const api = {
   updateNotebook: (id, body) => request(`/api/notebooks/${id}`, { method: "PATCH", body }),
   deleteNotebook: (id) => request(`/api/notebooks/${id}`, { method: "DELETE" }),
   notebookStats: (id) => request(`/api/notebooks/${id}/stats`),
-  sources: (notebookId) => request(`/api/notebooks/${notebookId}/sources`),
+  sources: (notebookId) => {
+    if (!notebookId) {
+      throw new ApiError("Notebook id is required", { status: 400 });
+    }
+
+    return request(`/api/notebooks/${encodeURIComponent(notebookId)}/sources`);
+  },
   source: (id) => request(`/api/sources/${id}`),
   sourceStatus: (id) => request(`/api/sources/${id}/status`),
   createSource: (notebookId, body) =>

@@ -214,6 +214,32 @@ export async function getNotebookSourcesController(
   try {
     const { notebookId } = request.params;
 
+    if (!isValidId(notebookId)) {
+      return response.status(400).json({
+        success: false,
+        message: "A valid notebook id is required",
+      });
+    }
+
+    if (Object.keys(request.query ?? {}).length > 0) {
+      return response.status(400).json({
+        success: false,
+        message:
+          "Source list does not accept query parameters",
+      });
+    }
+
+    if (
+      request.body &&
+      Object.keys(request.body).length > 0
+    ) {
+      return response.status(400).json({
+        success: false,
+        message:
+          "GET source list requests must not include a request body",
+      });
+    }
+
     const notebook =
       await getNotebookById(notebookId);
 
@@ -299,6 +325,15 @@ function isValidHttpUrl(value) {
   } catch (error) {
     return false;
   }
+}
+
+function isValidId(value) {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value
+    )
+  );
 }
 
 export async function getSourceStatusController(

@@ -46,10 +46,10 @@ export function buildPrompt({
               chunk.metadata?.sourceTitle ??
               "Untitled source";
 
-            const location =
-              JSON.stringify(
-                chunk.metadata?.location ?? {}
-              );
+            const location = formatPromptLocation(
+              chunk.metadata?.location,
+              chunk.metadata?.sourceType
+            );
 
             return `
 [${index + 1}]
@@ -79,4 +79,30 @@ INSTRUCTIONS:
 - If the source excerpts do not contain the answer, clearly say so.
 - Cite sources using [1], [2], or [1][2].
   `.trim();
+}
+
+function formatPromptLocation(location = {}, sourceType) {
+  const fields = location && typeof location === "object" ? location : {};
+  const type = String(sourceType ?? "").toUpperCase();
+
+  if (type === "PDF") {
+    const pageStart = fields.pageStart ?? fields.pageNumber ?? fields.page;
+    const pageEnd = fields.pageEnd ?? pageStart;
+
+    if (pageStart && pageEnd && Number(pageEnd) !== Number(pageStart)) {
+      return `Pages ${pageStart}-${pageEnd}`;
+    }
+
+    if (pageStart) {
+      return `Page ${pageStart}`;
+    }
+  }
+
+  if (fields.hostname) {
+    return fields.headingPath?.length
+      ? `${fields.hostname} - ${fields.headingPath.at(-1)}`
+      : fields.hostname;
+  }
+
+  return "Relevant passage";
 }

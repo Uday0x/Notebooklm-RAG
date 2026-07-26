@@ -38,6 +38,9 @@ import {
 
 import { prisma } from "./db/index.js";
 import { sourceQueue } from "./queues/source.queue.js";
+import {
+  checkYoutubeFallbackTools,
+} from "./parser/youtube/externalTools.js";
 
 export function createApp() {
   const app = express();
@@ -88,6 +91,12 @@ export function createApp() {
         supportedFileExtensions: SUPPORTED_FILE_EXTENSIONS,
         defaultRetrievalLimit: DEFAULT_RETRIEVAL_LIMIT,
         maxRetrievalLimit: MAX_RETRIEVAL_LIMIT,
+        youtubeAudioFallbackEnabled:
+          config.youtubeAudioFallbackEnabled,
+        youtubeMaxDurationSeconds:
+          config.youtubeMaxDurationSeconds,
+        youtubeMaxAudioBytes:
+          config.youtubeMaxAudioBytes,
       },
     });
   });
@@ -157,6 +166,10 @@ function corsMiddleware(request, response, next) {
 
 export async function startServer() {
   validateRequiredConfig();
+
+  if (config.youtubeAudioFallbackEnabled) {
+    await checkYoutubeFallbackTools();
+  }
 
   await connectPostgres();
   await connectRedis();
