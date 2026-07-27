@@ -498,8 +498,17 @@ function formatClientError(error) {
     status:
       error?.status ??
       error?.statusCode,
-    code: error?.code,
-    type: error?.type,
+    code:
+      error?.code ??
+      error?.error?.code,
+    type:
+      error?.type ??
+      error?.error?.type,
+    param:
+      error?.param ??
+      error?.error?.param,
+    detail:
+      error?.error?.message,
   };
 }
 
