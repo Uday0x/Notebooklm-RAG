@@ -347,6 +347,8 @@ textarea {
 .workspace {
   display: grid;
   grid-template-rows: var(--header-height) minmax(0, 1fr);
+  height: 100dvh;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -365,7 +367,9 @@ textarea {
 .workspace-grid {
   display: grid;
   grid-template-columns: var(--left-panel-width) 10px minmax(420px, 1fr) 0 0;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
   transition: grid-template-columns 180ms ease;
 }
 
@@ -423,9 +427,20 @@ body.pane-resizing {
 .sources-panel,
 .reference-panel,
 .chat-panel {
+  height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   border-right: 2px solid var(--pencil-line);
+}
+
+.desktop-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.desktop-panel > .sources-panel {
+  height: 100%;
 }
 
 .sources-panel,
@@ -601,7 +616,10 @@ body.pane-resizing {
 .chat-main {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .conversation-switcher {
