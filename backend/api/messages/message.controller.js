@@ -294,12 +294,17 @@ export async function createMessageController(
         new AbortController();
       let clientDisconnected = false;
 
-      request.on("close", () => {
+      prepareSseResponse(response);
+
+      response.on("close", () => {
+        if (response.writableEnded) {
+          return;
+        }
+
         clientDisconnected = true;
         streamAbortController.abort();
       });
 
-      prepareSseResponse(response);
       writeSseEvent(response, "metadata", {
         conversationId,
         conversationTitle:
