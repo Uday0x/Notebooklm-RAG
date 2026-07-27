@@ -1,5 +1,5 @@
 # MarginNote
-
+deployment link:https://notebooklm-1qtp1nc1o-udays-projects-68de3756.vercel.app
 A NotebookLM-inspired AI research assistant that lets users upload multiple knowledge sources, index them using vector embeddings, and chat with grounded answers backed by citations.
 
 The project is built with a production-oriented architecture using Express, PostgreSQL, Redis, BullMQ, Qdrant, OpenAI, and React.
