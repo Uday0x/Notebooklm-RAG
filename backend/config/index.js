@@ -126,6 +126,9 @@ export const config = {
   ),
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
   logLevel: process.env.LOG_LEVEL ?? "info",
+  exposeErrorDetails:
+    process.env.EXPOSE_ERROR_DETAILS === "true" ||
+    process.env.NODE_ENV === "development",
 };
 
 export function validateRequiredConfig() {

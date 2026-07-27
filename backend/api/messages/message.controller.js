@@ -28,6 +28,7 @@ import {
 } from "../../query-rewrite/index.js";
 
 import {
+  config,
   DEFAULT_MESSAGE_PAGE_LIMIT,
   DEFAULT_RETRIEVAL_LIMIT,
   MAX_MESSAGE_PAGE_LIMIT,
@@ -266,6 +267,17 @@ export async function createMessageController(
       });
 
     // 7. Search Qdrant using the rewritten query.
+    console.log(
+      "Chat retrieval started:",
+      {
+        conversationId,
+        notebookId,
+        selectedSourceCount:
+          sourceIds.length,
+        limit: parsedLimit,
+      }
+    );
+
     const retrievedChunks =
       await searchChunks({
         query: searchQuery,
@@ -273,6 +285,15 @@ export async function createMessageController(
         sourceIds,
         limit: parsedLimit,
       });
+
+    console.log(
+      "Chat retrieval completed:",
+      {
+        conversationId,
+        retrievedChunkCount:
+          retrievedChunks.length,
+      }
+    );
 
     const retrieval = {
       originalQuery: question,
@@ -316,6 +337,15 @@ export async function createMessageController(
       });
 
       try {
+        console.log(
+          "Chat stream generation started:",
+          {
+            conversationId,
+            retrievedChunkCount:
+              retrievedChunks.length,
+          }
+        );
+
         const generationResult =
           await answerQuestionStream({
             question,
@@ -329,6 +359,15 @@ export async function createMessageController(
               });
             },
           });
+
+        console.log(
+          "Chat stream generation completed:",
+          {
+            conversationId,
+            model:
+              generationResult.model,
+          }
+        );
 
         if (clientDisconnected) {
           return;
@@ -370,6 +409,9 @@ export async function createMessageController(
         writeSseError(response, {
           message:
             "Unable to process the message",
+          error: formatClientError(
+            error
+          ),
         });
 
         return endSseResponse(response);
@@ -428,6 +470,7 @@ export async function createMessageController(
       writeSseError(response, {
         message:
           "Unable to process the message",
+        error: formatClientError(error),
       });
 
       return endSseResponse(response);
@@ -438,13 +481,26 @@ export async function createMessageController(
       message:
         "Unable to process the message",
 
-      error:
-        process.env.NODE_ENV ===
-        "development"
-          ? error.message
-          : undefined,
+      error: formatClientError(error),
     });
   }
+}
+
+function formatClientError(error) {
+  if (!config.exposeErrorDetails) {
+    return undefined;
+  }
+
+  return {
+    message:
+      error?.message ??
+      "Unknown error",
+    status:
+      error?.status ??
+      error?.statusCode,
+    code: error?.code,
+    type: error?.type,
+  };
 }
 
 /**

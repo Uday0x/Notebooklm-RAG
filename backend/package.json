@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "nodemon app.js",
     "start": "node app.js",
+    "start:render": "npm run prisma:deploy && npm start",
     "worker": "node worker/source.worker.js",
+    "worker:render": "npm run worker",
     "worker:dev": "nodemon worker/source.worker.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
