@@ -1,5 +1,6 @@
 import { embedText } from "../embeddings/index.js";
 import { qdrantClient } from "../indexing/qdrant.client.js";
+import { ensureCollection } from "../indexing/ensureCollection.js";
 import { config } from "../config/index.js";
 
 const COLLECTION_NAME =
@@ -30,6 +31,8 @@ export async function searchChunks({
   if (!Array.isArray(sourceIds)) {
     throw new Error("sourceIds must be an array");
   }
+
+  await ensureCollection();
 
   const queryVector = await embedText(query.trim());
 
